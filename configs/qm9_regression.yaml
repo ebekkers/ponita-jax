@@ -1,0 +1,45 @@
+seed: 0
+device: None                              # Set to 'cpu' or 'cuda' to override automatic device selection
+
+logging:
+  log_dir: './logs'
+  log_every_n_steps: 50
+  visualize_every_n_steps: 1000
+  checkpoint: False
+  checkpoint_every_n_epochs: 25
+  keep_n_checkpoints: 5
+  no_progress_bar: False
+  debug: False
+
+ponita:
+  hidden_dim: 128
+  num_ori: 16
+  basis_dim: 256
+  degree: 2
+  num_layers: 9
+  widening_factor: 4
+  radius: 1000.
+  multiple_readouts: False
+  loop: True
+
+training:
+  train_augmentation: True
+  target: alpha
+  num_epochs: 10000
+  batch_size: 96
+  num_workers: 0
+  model_checkpoint: True
+  early_stopping: False
+
+test:
+  test_every_n_epochs: 1
+  test_interval: 1
+  batch_size: 96
+  min_num_epochs: 200
+
+optimizer:
+  seed: 42
+  name: adamw
+  learning_rate: 1e-5
+  clip_grad_norm: 1.0
+  weight_decay: 1e-10
