@@ -1,26 +1,29 @@
-import os
-from typing import Any
-from tqdm import tqdm
-from functools import partial
-import numpy as np
-
+from typing import Any, Dict
 import jax
 import jax.numpy as jnp
+from jax import random, jit
 import optax
-from flax import struct, core
-from orbax import checkpoint
+import numpy as np
+from flax import linen as nn
+from flax.training import train_state
+from flax.core.frozen_dict import freeze, unfreeze
+import wandb
+from tqdm import tqdm
+from functools import partial
+
+from datasets.qm9 import QM9Dataset, collate_fn
+from models.ponita_scatter import Ponita
 
 from torch.utils.data import DataLoader
 
-import wandb
 import hydra
 import omegaconf
 
-from datasets.qm9_fc import QM9Dataset, collate_fn  # Adjust as necessary
-from models.ponita_fully_connected import Ponita    # Adjust as necessary
+from flax import struct, core
 
+from orbax import checkpoint
 
-
+jax.config.update("jax_disable_jit", True)
 
 
 
@@ -69,6 +72,15 @@ class RandomSOd:
             return rotation_matrix.reshape(n, 3, 3)
         return rotation_matrix.reshape(3, 3)
 
+
+
+
+
+
+
+
+
+
 class  BaseJaxTrainer:
 
     def __init__(
@@ -93,8 +105,8 @@ class  BaseJaxTrainer:
         self.total_val_epochs = 0
 
         # Description strings for train and val progress bars
-        self.train_mae_epoch, self.val_mae_epoch = np.inf, np.inf
-        self.prog_bar_desc = """{state} :: epoch - {epoch}/{total_epochs} | step - {step}/{global_step} :: mae step {loss:.4f} -- train mae epoch {train_mae_epoch:.4f} -- val mae epoch {val_mae_epoch:.4f}"""
+        self.train_mse_epoch, self.val_mse_epoch = np.inf, np.inf
+        self.prog_bar_desc = """{state} :: epoch - {epoch}/{total_epochs} | step - {step}/{global_step} :: mse step {loss:.4f} -- train mse epoch {train_mse_epoch:.4f} -- val mse epoch {val_mse_epoch:.4f}"""
         self.prog_bar = tqdm(
             desc=self.prog_bar_desc.format(
                 state='Training',
@@ -103,8 +115,8 @@ class  BaseJaxTrainer:
                 step=0,
                 global_step=len(self.train_loader),
                 loss=jnp.inf,
-                train_mae_epoch=self.train_mae_epoch,
-                val_mae_epoch=self.val_mae_epoch
+                train_mse_epoch=self.train_mse_epoch,
+                val_mse_epoch=self.val_mse_epoch
             ),
             total=len(self.train_loader)
         )
@@ -172,15 +184,27 @@ class  BaseJaxTrainer:
                 step=step,
                 global_step=len(self.train_loader),
                 loss=loss,
-                train_mae_epoch=self.train_mae_epoch,
-                val_mae_epoch=self.val_mae_epoch
+                train_mse_epoch=self.train_mse_epoch,
+                val_mse_epoch=self.val_mse_epoch
             ),
         )
+
+
+
+
+
+
+
 
 class TrainState(struct.PyTreeNode):
     params: core.FrozenDict[str, Any] = struct.field(pytree_node=True)
     rng: jnp.ndarray = struct.field(pytree_node=True)
     opt_state: core.FrozenDict[str, Any] = struct.field(pytree_node=True)
+
+
+
+
+
 
 class QM9Trainer(BaseJaxTrainer):
 
@@ -209,17 +233,18 @@ class QM9Trainer(BaseJaxTrainer):
 
         # Model
         self.model = Ponita(
-                num_in = self.in_channels_scalar + in_channels_vec,
-                num_hidden = config.ponita.hidden_dim,
+                input_dim = self.in_channels_scalar + in_channels_vec,
+                hidden_dim = config.ponita.hidden_dim,
+                output_dim = out_channels_scalar,
+                batch_size = config.training.batch_size,
                 num_layers = config.ponita.num_layers,
-                scalar_num_out = out_channels_scalar,
-                vec_num_out = out_channels_vec,
-                spatial_dim = 3,
+                output_dim_vec = out_channels_vec,
                 num_ori = config.ponita.num_ori,
                 basis_dim = config.ponita.basis_dim,
                 degree = config.ponita.degree,
                 widening_factor = config.ponita.widening_factor,
-                global_pool = True
+                global_pool = True,
+                multiple_readouts = False,
         )
 
         self.shift = 0
@@ -254,10 +279,11 @@ class QM9Trainer(BaseJaxTrainer):
         key, model_key = jax.random.split(key)
 
         # Initialize model
-        pos = jnp.ones((self.config.training.batch_size,29,3))
-        x = jnp.ones((self.config.training.batch_size,29,5))
-        mask = jnp.ones((self.config.training.batch_size,29))
-        model_params = self.model.init(model_key, pos, x, mask)
+        pos = jnp.ones((29,3))
+        x = jnp.ones((29,5))
+        batch = jnp.zeros((29,), dtype=jnp.int32)
+        edge_index = jnp.ones((2, 100), dtype=jnp.int32)
+        model_params = self.model.init(model_key, pos, x, edge_index, batch)
 
         # Create train state
         train_state = TrainState(
@@ -288,11 +314,11 @@ class QM9Trainer(BaseJaxTrainer):
             # Apply 3 D rotation augmentation
             if self.train_aug and train:
                 rot = self.rotation_generator()
-                batch['pos'] = jnp.einsum('ij, bnj->bni', rot, batch['pos'])
+                batch['pos'] = jnp.einsum('ij, bj->bi', rot, batch['pos'])
             
             # Define loss and calculate gradients
             def loss_fn(params):
-                pred, _ = self.model.apply(params, batch['pos'], batch['x'], batch['mask'])
+                pred, _ = self.model.apply(params, batch['pos'], batch['x'], batch['edge_index'], batch['batch'])
                 label = batch['y']
                 loss = jnp.abs(pred - ((label - self.shift) / self.scale))
                 return jnp.mean(loss)
@@ -353,15 +379,16 @@ class QM9Trainer(BaseJaxTrainer):
 
             # Log every n steps
             if batch_idx % self.config.logging.log_every_n_steps == 0:
-                wandb.log({'train_mae_step': loss})
+                wandb.log({'train_mse_step': loss})
                 self.update_prog_bar(loss, step=batch_idx)
 
             # Increment global step
             self.global_step += 1
 
         # Update epoch loss
-        self.train_mae_epoch = losses / len(self.train_loader)
-        wandb.log({'epoch': epoch, "train MAE": self.train_mae_epoch}, commit=False)
+        self.train_mse_epoch = losses / len(self.train_loader)
+        wandb.log({'train_mse_epoch': self.train_mse_epoch})
+        wandb.log({'epoch': epoch})
         return state
     
     def validate_epoch(self, state):
@@ -375,12 +402,21 @@ class QM9Trainer(BaseJaxTrainer):
         for batch_idx, batch in enumerate(self.val_loader):
             loss, _ = self.val_step(state, batch)
             losses += loss
+
+            # Log every n steps
+            if batch_idx % self.config.logging.log_every_n_steps == 0:
+                wandb.log({'val_mse_step': loss})
+                self.update_prog_bar(loss, step=batch_idx, train=False)
+
+            # Increment global step
             self.global_val_step += 1
 
         # Update epoch loss
-        self.val_mae_epoch = losses / len(self.val_loader)
-        # wandb.log({'val_mae_epoch': self.val_mae_epoch}, commit=False)
-        wandb.log({'valid MAE': self.val_mae_epoch}, commit=False)
+        self.val_mse_epoch = losses / len(self.val_loader)
+        wandb.log({'val_mse_epoch': self.val_mse_epoch}, commit=False)
+
+
+
 
 
 @hydra.main(version_base=None, config_path="./configs", config_name="qm9_regression")
@@ -398,6 +434,7 @@ def train(config):
 
     # Define the dataloaders
     train_dataloader = DataLoader(train_dataset, batch_size=config.training.batch_size, shuffle=True, num_workers=config.training.num_workers, pin_memory=True, collate_fn=collate_fn, drop_last=True)
+    # train_dataloader = DataLoader(val_dataset, batch_size=config.training.batch_size, shuffle=True, num_workers=config.training.num_workers, pin_memory=True, collate_fn=collate_fn, drop_last=True)
     val_dataloader = DataLoader(val_dataset, batch_size=config.training.batch_size, shuffle=False, num_workers=config.training.num_workers, pin_memory=True, collate_fn=collate_fn)
 
     # Load and initialize the model
@@ -407,8 +444,7 @@ def train(config):
     # Initialize wandb
     wandb.init(
         entity=None,
-        project="PONITA-QM9",
-        name=config.training.target.replace(" ", "_"),
+        project="ponita-jax",
         dir=config.logging.log_dir,
         config=omegaconf.OmegaConf.to_container(config),
         mode='disabled' if config.logging.debug else 'online',
