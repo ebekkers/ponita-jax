@@ -1,0 +1,14 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+--find-links https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+
+jax[cuda12]
+torch==2.1.0+cpu
+wandb
+hydra-core
+tqdm
+orbax
+flax
+pandas
+rdkit
+gpustat

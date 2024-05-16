@@ -1,0 +1,4 @@
+venv/
+datasets/qm9_dataset
+outputs/
+*/__pycache__/
