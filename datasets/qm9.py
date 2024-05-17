@@ -233,6 +233,36 @@ def collate_fn(batch):
     edge_attr = np.concatenate(edge_attr_batch, axis=0)
     return {'pos': pos, 'x': x, 'y': y, 'batch': batch_idx, 'edge_index': edge_index,'edge_attr': edge_attr}
 
+def collate_fn_vmap_wrapper(is_static_shape=True, batch_size=96, nodes_max=29, edges_max=56):
+    def collate(batch):
+        pos, x, y, batch_idx, edge_index_batch, edge_attr_batch = [], [], [], [], [], []
+
+        # instead of what we have above, batch such that every sample is padded to the 
+        # maximum number of nodes and edges, and then stack them by adding a preceding 
+        # batch dimension
+
+        for i, item in enumerate(batch):
+            # append after padding
+
+            num_nodes = item['x'].shape[0]
+            num_edges = item['edge_index'].shape[1]
+            pos.append(np.pad(item['pos'], ((0, nodes_max - num_nodes), (0, 0))))
+            x.append(np.pad(item['x'], ((0, nodes_max - num_nodes), (0, 0))))
+            y.append(item['y'])
+            batch_idx.append(np.pad(np.zeros(num_nodes, dtype=jnp.int32), (0, nodes_max - num_nodes), constant_values=nodes_max))
+            edge_index_batch.append(np.pad(item['edge_index'], ((0, 0), (0, edges_max - num_edges)), constant_values=edges_max))
+            edge_attr_batch.append(np.pad(item['edge_attr'], ((0, edges_max - num_edges), (0, 0))))
+
+        pos = np.stack(pos, axis=0)
+        x = np.stack(x, axis=0)
+        y = np.stack(y, axis=0)
+        batch_idx = np.stack(batch_idx, axis=0)
+        edge_index = np.stack(edge_index_batch, axis=0)
+        edge_attr = np.stack(edge_attr_batch, axis=0)
+
+        return {'pos': pos, 'x': x, 'y': y, 'batch': batch_idx, 'edge_index': edge_index,'edge_attr': edge_attr}
+    return collate
+
 if __name__ == '__main__':
     from torch.utils.data import DataLoader
     import time

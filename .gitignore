@@ -6,5 +6,8 @@ __pycache__/
 
 datasets/*/
 logs/*
-outputs
+outputs/
 .idea/*
+
+venv/
+*/__pycache__/

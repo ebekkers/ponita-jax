@@ -1,7 +1,8 @@
+import os
 from typing import Any, Dict
 import jax
 import jax.numpy as jnp
-from jax import random, jit
+from jax import random, jit, vmap
 import optax
 import numpy as np
 from flax import linen as nn
@@ -11,7 +12,7 @@ import wandb
 from tqdm import tqdm
 from functools import partial
 
-from datasets.qm9 import QM9Dataset, collate_fn
+from datasets.qm9 import QM9Dataset, collate_fn, collate_fn_vmap_wrapper
 from models.ponita_scatter import Ponita
 
 from torch.utils.data import DataLoader
@@ -23,7 +24,7 @@ from flax import struct, core
 
 from orbax import checkpoint
 
-jax.config.update("jax_disable_jit", True)
+# jax.config.update("jax_disable_jit", True)
 
 
 
@@ -236,7 +237,7 @@ class QM9Trainer(BaseJaxTrainer):
                 input_dim = self.in_channels_scalar + in_channels_vec,
                 hidden_dim = config.ponita.hidden_dim,
                 output_dim = out_channels_scalar,
-                batch_size = config.training.batch_size,
+                batch_size = 1,
                 num_layers = config.ponita.num_layers,
                 output_dim_vec = out_channels_vec,
                 num_ori = config.ponita.num_ori,
@@ -279,10 +280,12 @@ class QM9Trainer(BaseJaxTrainer):
         key, model_key = jax.random.split(key)
 
         # Initialize model
-        pos = jnp.ones((29,3))
-        x = jnp.ones((29,5))
-        batch = jnp.zeros((29,), dtype=jnp.int32)
-        edge_index = jnp.ones((2, 100), dtype=jnp.int32)
+        samples_batch = next(iter(self.train_loader))
+        sample = jax.tree.map(lambda x: jnp.asarray(x[0]), samples_batch) # get a sample
+        pos = sample["pos"]
+        x = sample["x"]
+        edge_index = sample["edge_index"]
+        batch = sample["batch"]
         model_params = self.model.init(model_key, pos, x, edge_index, batch)
 
         # Create train state
@@ -311,18 +314,23 @@ class QM9Trainer(BaseJaxTrainer):
             # Split random key
             rng, key = jax.random.split(state.rng)
 
-            # Apply 3 D rotation augmentation
-            if self.train_aug and train:
-                rot = self.rotation_generator()
-                batch['pos'] = jnp.einsum('ij, bj->bi', rot, batch['pos'])
-            
             # Define loss and calculate gradients
-            def loss_fn(params):
-                pred, _ = self.model.apply(params, batch['pos'], batch['x'], batch['edge_index'], batch['batch'])
-                label = batch['y']
+            def loss_fn(params, batch_i):
+                # Apply 3 D rotation augmentation
+                if self.train_aug and train:
+                    rot = self.rotation_generator()
+                    batch_i['pos'] = jnp.einsum('ij, bj->bi', rot, batch_i['pos'])
+
+                pred, _ = self.model.apply(params, batch_i['pos'], batch_i['x'], batch_i['edge_index'], batch_i['batch'])
+                label = batch_i['y']
                 loss = jnp.abs(pred - ((label - self.shift) / self.scale))
                 return jnp.mean(loss)
-            loss, grads = jax.value_and_grad(loss_fn)(state.params)
+            
+            # loss, grads = jax.value_and_grad(loss_fn)(state.params)
+            value_and_grad_vmap = vmap(jax.value_and_grad(loss_fn), in_axes=(None, 0))
+            loss, grads = value_and_grad_vmap(state.params, batch)
+            loss = jax.tree.map(lambda x: x.mean(axis=0), loss)
+            grads = jax.tree.map(lambda x: x.mean(axis=0), grads)
 
             # Update autodecoder
             updates, opt_state = self.optimizer.update(grads, state.opt_state)
@@ -433,9 +441,10 @@ def train(config):
     test_dataset = QM9Dataset(split='test', target=config.training.target)
 
     # Define the dataloaders
-    train_dataloader = DataLoader(train_dataset, batch_size=config.training.batch_size, shuffle=True, num_workers=config.training.num_workers, pin_memory=True, collate_fn=collate_fn, drop_last=True)
-    # train_dataloader = DataLoader(val_dataset, batch_size=config.training.batch_size, shuffle=True, num_workers=config.training.num_workers, pin_memory=True, collate_fn=collate_fn, drop_last=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=config.training.batch_size, shuffle=False, num_workers=config.training.num_workers, pin_memory=True, collate_fn=collate_fn)
+    collate_fn_vmap = collate_fn_vmap_wrapper(is_static_shape=True, batch_size=config.training.batch_size, nodes_max=29, edges_max=56)
+    train_dataloader = DataLoader(train_dataset, batch_size=config.training.batch_size, shuffle=True, num_workers=config.training.num_workers, pin_memory=True, collate_fn=collate_fn_vmap, drop_last=True)
+    # train_dataloader = DataLoader(val_dataset, batch_size=config.training.batch_size, shuffle=True, num_workers=config.training.num_workers, pin_memory=True, collate_fn=collate_fn_vmap, drop_last=True)
+    val_dataloader = DataLoader(val_dataset, batch_size=config.training.batch_size, shuffle=False, num_workers=config.training.num_workers, pin_memory=True, collate_fn=collate_fn_vmap)
 
     # Load and initialize the model
     trainer = QM9Trainer(config, train_dataloader, val_dataloader, seed=config.optimizer.seed)
