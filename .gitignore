@@ -1,0 +1,10 @@
+*.egg-info*
+__pycache__/
+.vscode
+.pytest_cache
+.python-version
+
+datasets/*/
+logs/*
+outputs
+.idea/*
