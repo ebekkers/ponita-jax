@@ -1,4 +1,13 @@
-venv/
-datasets/qm9_dataset
+*.egg-info*
+__pycache__/
+.vscode
+.pytest_cache
+.python-version
+
+datasets/*/
+logs/*
 outputs/
+.idea/*
+
+venv/
 */__pycache__/
